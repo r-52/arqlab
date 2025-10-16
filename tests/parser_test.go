@@ -59,6 +59,107 @@ func TestParseExpressionStatement(t *testing.T) {
 	}
 }
 
+func TestParseNewExpressionSimple(t *testing.T) {
+	prog := parseProgram(t, "new Foo(1, 2);")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	newExpr, ok := exprStmt.Expression.(*ast.NewExpression)
+	if !ok {
+		t.Fatalf("expected NewExpression, got %T", exprStmt.Expression)
+	}
+
+	callee, ok := newExpr.Callee.(*ast.Identifier)
+	if !ok || callee.Name != "Foo" {
+		t.Fatalf("unexpected callee: %#v", newExpr.Callee)
+	}
+
+	if len(newExpr.Arguments) != 2 {
+		t.Fatalf("expected 2 arguments, got %d", len(newExpr.Arguments))
+	}
+
+	for i, want := range []string{"1", "2"} {
+		num, ok := newExpr.Arguments[i].(*ast.NumberLiteral)
+		if !ok || num.Value != want {
+			t.Fatalf("argument %d mismatch: %#v", i, newExpr.Arguments[i])
+		}
+	}
+}
+
+func TestParseNewExpressionChainedCall(t *testing.T) {
+	prog := parseProgram(t, "new Foo()();")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	call, ok := exprStmt.Expression.(*ast.CallExpression)
+	if !ok {
+		t.Fatalf("expected CallExpression, got %T", exprStmt.Expression)
+	}
+
+	innerNew, ok := call.Callee.(*ast.NewExpression)
+	if !ok {
+		t.Fatalf("expected inner callee to be NewExpression, got %T", call.Callee)
+	}
+
+	if len(innerNew.Arguments) != 0 {
+		t.Fatalf("expected new Foo() to have no arguments, got %d", len(innerNew.Arguments))
+	}
+
+	if _, ok := innerNew.Callee.(*ast.Identifier); !ok {
+		t.Fatalf("expected identifier callee in new expression, got %T", innerNew.Callee)
+	}
+}
+
+func TestParseNewExpressionMemberAccess(t *testing.T) {
+	prog := parseProgram(t, "new Foo().bar();")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	call, ok := exprStmt.Expression.(*ast.CallExpression)
+	if !ok {
+		t.Fatalf("unexpected expression: %#v", exprStmt.Expression)
+	}
+
+	member, ok := call.Callee.(*ast.MemberExpression)
+	if !ok {
+		t.Fatalf("expected member callee, got %T", call.Callee)
+	}
+
+	innerNew, ok := member.Object.(*ast.NewExpression)
+	if !ok {
+		t.Fatalf("expected member object to be NewExpression, got %T", member.Object)
+	}
+
+	if _, ok := member.Property.(*ast.Identifier); !ok {
+		t.Fatalf("expected identifier property, got %T", member.Property)
+	}
+
+	if len(innerNew.Arguments) != 0 {
+		t.Fatalf("expected no arguments in new Foo(), got %d", len(innerNew.Arguments))
+	}
+}
+
 func TestParseVariableDeclaration(t *testing.T) {
 	prog := parseProgram(t, "const answer = 42;")
 
@@ -581,5 +682,319 @@ func TestParseSwitchStatement(t *testing.T) {
 
 	if _, ok := second.Consequent[0].(*ast.ExpressionStatement); !ok {
 		t.Fatalf("expected expression statement in default case, got %T", second.Consequent[0])
+	}
+}
+
+func TestParseWithStatement(t *testing.T) {
+	prog := parseProgram(t, "with (ctx) { ctx.run(); }")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	withStmt, ok := prog.Body[0].(*ast.WithStatement)
+	if !ok {
+		t.Fatalf("expected WithStatement, got %T", prog.Body[0])
+	}
+
+	obj, ok := withStmt.Object.(*ast.Identifier)
+	if !ok || obj.Name != "ctx" {
+		t.Fatalf("unexpected with object: %#v", withStmt.Object)
+	}
+
+	body, ok := withStmt.Body.(*ast.BlockStatement)
+	if !ok {
+		t.Fatalf("expected with body BlockStatement, got %T", withStmt.Body)
+	}
+
+	if len(body.Body) != 1 {
+		t.Fatalf("expected 1 statement in with body, got %d", len(body.Body))
+	}
+}
+
+func TestParseLabeledStatement(t *testing.T) {
+	prog := parseProgram(t, "loop: while (true) break loop;")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	labeled, ok := prog.Body[0].(*ast.LabeledStatement)
+	if !ok {
+		t.Fatalf("expected LabeledStatement, got %T", prog.Body[0])
+	}
+
+	if labeled.Label == nil || labeled.Label.Name != "loop" {
+		t.Fatalf("unexpected label: %#v", labeled.Label)
+	}
+
+	body, ok := labeled.Body.(*ast.WhileStatement)
+	if !ok {
+		t.Fatalf("expected labeled body WhileStatement, got %T", labeled.Body)
+	}
+
+	brk, ok := body.Body.(*ast.BreakStatement)
+	if !ok {
+		t.Fatalf("expected break in loop body, got %T", body.Body)
+	}
+
+	if brk.Label == nil || brk.Label.Name != "loop" {
+		t.Fatalf("unexpected break label: %#v", brk.Label)
+	}
+}
+
+func TestParseTryCatchFinally(t *testing.T) {
+	prog := parseProgram(t, "try { risky(); } catch (err) { handle(err); } finally { cleanup(); }")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	tryStmt, ok := prog.Body[0].(*ast.TryStatement)
+	if !ok {
+		t.Fatalf("expected TryStatement, got %T", prog.Body[0])
+	}
+
+	if tryStmt.Block == nil || len(tryStmt.Block.Body) != 1 {
+		t.Fatalf("unexpected try block: %#v", tryStmt.Block)
+	}
+
+	if tryStmt.Handler == nil {
+		t.Fatalf("expected catch handler")
+	}
+
+	param, ok := tryStmt.Handler.Param.(*ast.Identifier)
+	if !ok || param.Name != "err" {
+		t.Fatalf("unexpected catch parameter: %#v", tryStmt.Handler.Param)
+	}
+
+	if tryStmt.Handler.Body == nil || len(tryStmt.Handler.Body.Body) != 1 {
+		t.Fatalf("unexpected catch body: %#v", tryStmt.Handler.Body)
+	}
+
+	if tryStmt.Finalizer == nil || len(tryStmt.Finalizer.Body) != 1 {
+		t.Fatalf("unexpected finally block: %#v", tryStmt.Finalizer)
+	}
+}
+
+func TestParseFunctionDeclaration(t *testing.T) {
+	prog := parseProgram(t, "function greet(name, title = \"Dr\") { return name; }")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	fn, ok := prog.Body[0].(*ast.FunctionDeclaration)
+	if !ok {
+		t.Fatalf("expected FunctionDeclaration, got %T", prog.Body[0])
+	}
+
+	if fn.Generator {
+		t.Fatalf("expected non-generator function")
+	}
+
+	if fn.ID == nil || fn.ID.Name != "greet" {
+		t.Fatalf("unexpected function name: %#v", fn.ID)
+	}
+
+	if len(fn.Params) != 2 {
+		t.Fatalf("expected 2 parameters, got %d", len(fn.Params))
+	}
+
+	if _, ok := fn.Params[0].(*ast.Identifier); !ok {
+		t.Fatalf("expected first parameter Identifier, got %T", fn.Params[0])
+	}
+
+	assign, ok := fn.Params[1].(*ast.AssignmentPattern)
+	if !ok {
+		t.Fatalf("expected second parameter AssignmentPattern, got %T", fn.Params[1])
+	}
+
+	right, ok := assign.Right.(*ast.StringLiteral)
+	if !ok || right.Value != "Dr" {
+		t.Fatalf("unexpected default value: %#v", assign.Right)
+	}
+
+	if fn.Body == nil || len(fn.Body.Body) != 1 {
+		t.Fatalf("unexpected function body: %#v", fn.Body)
+	}
+}
+
+func TestParseGeneratorFunctionDeclaration(t *testing.T) {
+	prog := parseProgram(t, "function* iterate(...items) { return items; }")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	fn, ok := prog.Body[0].(*ast.FunctionDeclaration)
+	if !ok {
+		t.Fatalf("expected FunctionDeclaration, got %T", prog.Body[0])
+	}
+
+	if !fn.Generator {
+		t.Fatalf("expected generator function")
+	}
+
+	if len(fn.Params) != 1 {
+		t.Fatalf("expected rest parameter only, got %d", len(fn.Params))
+	}
+
+	rest, ok := fn.Params[0].(*ast.RestElement)
+	if !ok {
+		t.Fatalf("expected RestElement, got %T", fn.Params[0])
+	}
+
+	if ident, ok := rest.Argument.(*ast.Identifier); !ok || ident.Name != "items" {
+		t.Fatalf("unexpected rest argument: %#v", rest.Argument)
+	}
+}
+
+func TestParseArrayLiteralExpression(t *testing.T) {
+	prog := parseProgram(t, "const arr = [1,,2,...more];")
+
+	decl, ok := prog.Body[0].(*ast.VariableDeclaration)
+	if !ok {
+		t.Fatalf("expected VariableDeclaration, got %T", prog.Body[0])
+	}
+
+	arrInit, ok := decl.Declarations[0].Init.(*ast.ArrayLiteral)
+	if !ok {
+		t.Fatalf("expected ArrayLiteral, got %T", decl.Declarations[0].Init)
+	}
+
+	if len(arrInit.Elements) != 4 {
+		t.Fatalf("expected 4 elements, got %d", len(arrInit.Elements))
+	}
+
+	if _, ok := arrInit.Elements[0].(*ast.NumberLiteral); !ok {
+		t.Fatalf("expected first element NumberLiteral, got %T", arrInit.Elements[0])
+	}
+
+	if arrInit.Elements[1] != nil {
+		t.Fatalf("expected hole in second position, got %#v", arrInit.Elements[1])
+	}
+
+	if num, ok := arrInit.Elements[2].(*ast.NumberLiteral); !ok || num.Value != "2" {
+		t.Fatalf("unexpected third element: %#v", arrInit.Elements[2])
+	}
+
+	spread, ok := arrInit.Elements[3].(*ast.SpreadElement)
+	if !ok {
+		t.Fatalf("expected spread element, got %T", arrInit.Elements[3])
+	}
+
+	if ident, ok := spread.Argument.(*ast.Identifier); !ok || ident.Name != "more" {
+		t.Fatalf("unexpected spread argument: %#v", spread.Argument)
+	}
+}
+
+func TestParseObjectLiteralExpression(t *testing.T) {
+	prog := parseProgram(t, "const obj = { foo, bar: 2, [\"baz\"]: value, ...rest };")
+
+	decl, ok := prog.Body[0].(*ast.VariableDeclaration)
+	if !ok {
+		t.Fatalf("expected VariableDeclaration, got %T", prog.Body[0])
+	}
+
+	objInit, ok := decl.Declarations[0].Init.(*ast.ObjectLiteral)
+	if !ok {
+		t.Fatalf("expected ObjectLiteral, got %T", decl.Declarations[0].Init)
+	}
+
+	if len(objInit.Properties) != 4 {
+		t.Fatalf("expected 4 properties, got %d", len(objInit.Properties))
+	}
+
+	prop0, ok := objInit.Properties[0].(*ast.ObjectProperty)
+	if !ok || !prop0.Shorthand {
+		t.Fatalf("expected shorthand property, got %#v", objInit.Properties[0])
+	}
+
+	prop1, ok := objInit.Properties[1].(*ast.ObjectProperty)
+	if !ok {
+		t.Fatalf("expected object property, got %T", objInit.Properties[1])
+	}
+
+	if num, ok := prop1.Value.(*ast.NumberLiteral); !ok || num.Value != "2" {
+		t.Fatalf("unexpected value for bar: %#v", prop1.Value)
+	}
+
+	prop2, ok := objInit.Properties[2].(*ast.ObjectProperty)
+	if !ok || !prop2.Computed {
+		t.Fatalf("expected computed property, got %#v", objInit.Properties[2])
+	}
+
+	if lit, ok := prop2.Key.(*ast.StringLiteral); !ok || lit.Value != "baz" {
+		t.Fatalf("unexpected computed key: %#v", prop2.Key)
+	}
+
+	spread, ok := objInit.Properties[3].(*ast.SpreadElement)
+	if !ok {
+		t.Fatalf("expected spread element, got %T", objInit.Properties[3])
+	}
+
+	if ident, ok := spread.Argument.(*ast.Identifier); !ok || ident.Name != "rest" {
+		t.Fatalf("unexpected spread argument: %#v", spread.Argument)
+	}
+}
+
+func TestParseConditionalExpression(t *testing.T) {
+	prog := parseProgram(t, "const result = cond ? left() : right;")
+
+	decl, ok := prog.Body[0].(*ast.VariableDeclaration)
+	if !ok {
+		t.Fatalf("expected VariableDeclaration, got %T", prog.Body[0])
+	}
+
+	condExpr, ok := decl.Declarations[0].Init.(*ast.ConditionalExpression)
+	if !ok {
+		t.Fatalf("expected ConditionalExpression, got %T", decl.Declarations[0].Init)
+	}
+
+	if ident, ok := condExpr.Test.(*ast.Identifier); !ok || ident.Name != "cond" {
+		t.Fatalf("unexpected test: %#v", condExpr.Test)
+	}
+
+	if _, ok := condExpr.Consequent.(*ast.CallExpression); !ok {
+		t.Fatalf("expected call expression consequent, got %T", condExpr.Consequent)
+	}
+
+	if alt, ok := condExpr.Alternate.(*ast.Identifier); !ok || alt.Name != "right" {
+		t.Fatalf("unexpected alternate: %#v", condExpr.Alternate)
+	}
+}
+
+func TestParseSequenceExpression(t *testing.T) {
+	prog := parseProgram(t, "a(), b = 2, c + d;")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	seq, ok := exprStmt.Expression.(*ast.SequenceExpression)
+	if !ok {
+		t.Fatalf("expected SequenceExpression, got %T", exprStmt.Expression)
+	}
+
+	if len(seq.Expressions) != 3 {
+		t.Fatalf("expected 3 expressions in sequence, got %d", len(seq.Expressions))
+	}
+
+	if _, ok := seq.Expressions[0].(*ast.CallExpression); !ok {
+		t.Fatalf("expected call expression first, got %T", seq.Expressions[0])
+	}
+
+	if _, ok := seq.Expressions[1].(*ast.AssignmentExpression); !ok {
+		t.Fatalf("expected assignment second, got %T", seq.Expressions[1])
+	}
+
+	if _, ok := seq.Expressions[2].(*ast.BinaryExpression); !ok {
+		t.Fatalf("expected binary expression third, got %T", seq.Expressions[2])
 	}
 }

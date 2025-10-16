@@ -7,6 +7,7 @@ const (
 	CallExpressionKind           NodeKind = "CallExpression"
 	NewExpressionKind            NodeKind = "NewExpression"
 	TaggedTemplateExpressionKind NodeKind = "TaggedTemplateExpression"
+	ArrowFunctionExpressionKind  NodeKind = "ArrowFunctionExpression"
 	BinaryExpressionKind         NodeKind = "BinaryExpression"
 	LogicalExpressionKind        NodeKind = "LogicalExpression"
 	AssignmentExpressionKind     NodeKind = "AssignmentExpression"
@@ -215,4 +216,22 @@ func (s *SequenceExpression) node()       {}
 func (s *SequenceExpression) expression() {}
 func (s *SequenceExpression) String() string {
 	return "SequenceExpression"
+}
+
+// ArrowFunctionExpression models parameter => body constructs.
+type ArrowFunctionExpression struct {
+	BaseNode
+	Params         []Pattern
+	Body           Node
+	ExpressionBody bool
+}
+
+func NewArrowFunctionExpression(params []Pattern, body Node, expressionBody bool, loc Location) *ArrowFunctionExpression {
+	return &ArrowFunctionExpression{BaseNode: NewBaseNode(ArrowFunctionExpressionKind, loc), Params: params, Body: body, ExpressionBody: expressionBody}
+}
+
+func (a *ArrowFunctionExpression) node()       {}
+func (a *ArrowFunctionExpression) expression() {}
+func (a *ArrowFunctionExpression) String() string {
+	return "ArrowFunctionExpression"
 }

@@ -42,6 +42,10 @@ func (p *Parser) parseStatement() ast.Statement {
 			return p.parseLabeledStatement()
 		}
 		return p.parseExpressionStatement()
+	case lexer.KeywordTry:
+		return p.parseTryStatement()
+	case lexer.KeywordFunction:
+		return p.parseFunctionDeclaration()
 	default:
 		return p.parseExpressionStatement()
 	}
@@ -419,6 +423,207 @@ func (p *Parser) parseLabeledStatement() ast.Statement {
 
 	loc := ast.Location{Start: convertPosition(start), End: body.Loc().End}
 	return ast.NewLabeledStatement(label, body, loc)
+}
+
+func (p *Parser) parseTryStatement() ast.Statement {
+	start := p.curToken.Start
+
+	if !p.expectPeek(lexer.LBrace) {
+		return nil
+	}
+
+	blockStmt := p.parseBlockStatement()
+	if blockStmt == nil {
+		return nil
+	}
+
+	tryBlock, ok := blockStmt.(*ast.BlockStatement)
+	if !ok {
+		p.errors = append(p.errors, errors.New("try block did not produce BlockStatement"))
+		return nil
+	}
+
+	end := p.curToken.End
+
+	var handler *ast.CatchClause
+	var finalizer *ast.BlockStatement
+
+	if p.peekTokenIs(lexer.KeywordCatch) {
+		p.nextToken()
+		handler = p.parseCatchClause()
+		if handler == nil {
+			return nil
+		}
+		end = p.curToken.End
+	}
+
+	if p.peekTokenIs(lexer.KeywordFinally) {
+		p.nextToken()
+		if !p.expectPeek(lexer.LBrace) {
+			return nil
+		}
+		finalizerStmt := p.parseBlockStatement()
+		if finalizerStmt == nil {
+			return nil
+		}
+		var ok bool
+		finalizer, ok = finalizerStmt.(*ast.BlockStatement)
+		if !ok {
+			p.errors = append(p.errors, errors.New("finally block did not produce BlockStatement"))
+			return nil
+		}
+		end = p.curToken.End
+	}
+
+	if handler == nil && finalizer == nil {
+		p.errors = append(p.errors, errors.New("try statement requires catch or finally"))
+		return nil
+	}
+
+	loc := p.locFrom(start, end)
+	return ast.NewTryStatement(tryBlock, handler, finalizer, loc)
+}
+
+func (p *Parser) parseCatchClause() *ast.CatchClause {
+	start := p.curToken.Start
+
+	if !p.expectPeek(lexer.LParen) {
+		return nil
+	}
+
+	p.nextToken()
+	param := p.parseBindingElement(false)
+	if param == nil {
+		return nil
+	}
+
+	if !p.expectPeek(lexer.RParen) {
+		return nil
+	}
+
+	if !p.expectPeek(lexer.LBrace) {
+		return nil
+	}
+
+	bodyStmt := p.parseBlockStatement()
+	if bodyStmt == nil {
+		return nil
+	}
+
+	body, ok := bodyStmt.(*ast.BlockStatement)
+	if !ok {
+		p.errors = append(p.errors, errors.New("catch body did not produce BlockStatement"))
+		return nil
+	}
+
+	loc := p.locFrom(start, p.curToken.End)
+	return ast.NewCatchClause(param, body, loc)
+}
+
+func (p *Parser) parseFunctionDeclaration() ast.Statement {
+	start := p.curToken.Start
+
+	isGenerator := false
+	if p.peekTokenIs(lexer.Multiply) {
+		p.nextToken()
+		isGenerator = true
+	}
+
+	if !p.expectPeek(lexer.Identifier) {
+		return nil
+	}
+
+	nameTok := p.curToken
+	id := ast.NewIdentifier(nameTok.Literal, p.tokenLocation(nameTok))
+
+	if !p.expectPeek(lexer.LParen) {
+		return nil
+	}
+
+	params, ok := p.parseFunctionParams()
+	if !ok {
+		return nil
+	}
+
+	if !p.expectPeek(lexer.LBrace) {
+		return nil
+	}
+
+	bodyStmt := p.parseBlockStatement()
+	if bodyStmt == nil {
+		return nil
+	}
+
+	body, ok2 := bodyStmt.(*ast.BlockStatement)
+	if !ok2 {
+		p.errors = append(p.errors, errors.New("function body did not produce BlockStatement"))
+		return nil
+	}
+
+	loc := p.locFrom(start, p.curToken.End)
+	return ast.NewFunctionDeclaration(id, params, body, isGenerator, loc)
+}
+
+func (p *Parser) parseFunctionParams() ([]ast.Pattern, bool) {
+	var params []ast.Pattern
+
+	if p.peekTokenIs(lexer.RParen) {
+		p.nextToken()
+		return params, true
+	}
+
+	// move to first parameter token
+	p.nextToken()
+
+	restSeen := false
+	for !p.curTokenIs(lexer.RParen) && !p.curTokenIs(lexer.EOF) {
+		if restSeen {
+			p.errors = append(p.errors, errors.New("parameters not allowed after rest element"))
+			return nil, false
+		}
+
+		if p.curTokenIs(lexer.Ellipsis) {
+			restStart := p.curToken.Start
+			p.nextToken()
+			arg := p.parseBindingElement(false)
+			if arg == nil {
+				return nil, false
+			}
+			rest := ast.NewRestElement(arg, p.locFrom(restStart, p.curToken.End))
+			params = append(params, rest)
+			restSeen = true
+			if !p.expectPeek(lexer.RParen) {
+				return nil, false
+			}
+			break
+		}
+
+		param := p.parseBindingElement(true)
+		if param == nil {
+			return nil, false
+		}
+		params = append(params, param)
+
+		if p.peekTokenIs(lexer.Comma) {
+			p.nextToken()
+			if p.peekTokenIs(lexer.RParen) {
+				p.errors = append(p.errors, errors.New("trailing comma without parameter"))
+				return nil, false
+			}
+			p.nextToken()
+			continue
+		}
+
+		if p.peekTokenIs(lexer.RParen) {
+			p.nextToken()
+			break
+		}
+
+		p.errors = append(p.errors, errors.New("unexpected token in parameter list"))
+		return nil, false
+	}
+
+	return params, true
 }
 
 func (p *Parser) parseForStatement() ast.Statement {

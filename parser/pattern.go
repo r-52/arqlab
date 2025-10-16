@@ -19,7 +19,7 @@ func (p *Parser) parseBindingElement(allowDefault bool) ast.Pattern {
 	if allowDefault && p.peekTokenIs(lexer.Assign) {
 		p.nextToken() // move to '='
 		p.nextToken() // advance to initializer expression
-		right := p.parseExpression(lowest)
+		right := p.parseExpression(sequencePrec)
 		if right == nil {
 			return nil
 		}
@@ -190,7 +190,7 @@ func (p *Parser) parseObjectPatternProperty() *ast.ObjectPatternProperty {
 		} else if p.peekTokenIs(lexer.Assign) {
 			p.nextToken() // move to '='
 			p.nextToken() // move to initializer expression
-			right := p.parseExpression(lowest)
+			right := p.parseExpression(sequencePrec)
 			if right == nil {
 				return nil
 			}

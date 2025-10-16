@@ -3,6 +3,7 @@ package parser
 import (
 	"errors"
 	"strconv"
+	"strings"
 
 	"es6-interpreter/ast"
 	"es6-interpreter/lexer"
@@ -22,8 +23,15 @@ func (p *Parser) registerPrefixFns() {
 	p.registerPrefix(lexer.Plus, p.parsePrefixExpression)
 	p.registerPrefix(lexer.Increment, p.parsePrefixExpression)
 	p.registerPrefix(lexer.Decrement, p.parsePrefixExpression)
+	p.registerPrefix(lexer.LBracket, p.parseArrayLiteral)
+	p.registerPrefix(lexer.LBrace, p.parseObjectLiteral)
+	p.registerPrefix(lexer.Regex, p.parseRegExpLiteral)
 	p.registerPrefix(lexer.KeywordThis, p.parseThisExpression)
 	p.registerPrefix(lexer.KeywordSuper, p.parseSuperExpression)
+	p.registerPrefix(lexer.KeywordTypeof, p.parsePrefixExpression)
+	p.registerPrefix(lexer.KeywordVoid, p.parsePrefixExpression)
+	p.registerPrefix(lexer.KeywordDelete, p.parsePrefixExpression)
+	p.registerPrefix(lexer.KeywordNew, p.parseNewExpression)
 }
 
 func (p *Parser) registerInfixFns() {
@@ -66,6 +74,8 @@ func (p *Parser) registerInfixFns() {
 	p.registerInfix(lexer.BitwiseAnd, p.parseInfixExpression)
 	p.registerInfix(lexer.BitwiseOr, p.parseInfixExpression)
 	p.registerInfix(lexer.BitwiseXor, p.parseInfixExpression)
+	p.registerInfix(lexer.Question, p.parseConditionalExpression)
+	p.registerInfix(lexer.Comma, p.parseSequenceExpression)
 }
 
 func (p *Parser) registerPrefix(tt lexer.TokenType, fn prefixParseFn) {
@@ -234,13 +244,68 @@ func (p *Parser) parseAssignmentExpression(left ast.Expression) ast.Expression {
 	return ast.NewAssignmentExpression(operator, left, right, loc)
 }
 
+func (p *Parser) parseNewExpression() ast.Expression {
+	newTok := p.curToken
+	start := newTok.Start
+
+	// Advance to the token following `new` for further inspection.
+	p.nextToken()
+
+	// Handle meta property new.target explicitly.
+	if p.curTokenIs(lexer.Dot) {
+		if !p.expectPeek(lexer.Identifier) {
+			return nil
+		}
+		identTok := p.curToken
+		if identTok.Literal != "target" {
+			p.errors = append(p.errors, errors.New("expected target after new"))
+			return nil
+		}
+		meta := ast.NewIdentifier("new", p.locFrom(newTok.Start, newTok.End))
+		property := ast.NewIdentifier(identTok.Literal, p.tokenLocation(identTok))
+		loc := p.locFrom(newTok.Start, identTok.End)
+		return ast.NewMetaProperty(meta, property, loc)
+	}
+
+	expr := p.parseExpression(postfixPrec)
+	if expr == nil {
+		return nil
+	}
+
+	return p.wrapNewExpression(expr, start)
+}
+
+func (p *Parser) parseConditionalExpression(test ast.Expression) ast.Expression {
+	start := test.Loc().Start
+
+	// parse consequent expression after '?'
+	p.nextToken()
+	consequent := p.parseExpression(lowest)
+	if consequent == nil {
+		return nil
+	}
+
+	if !p.expectPeek(lexer.Colon) {
+		return nil
+	}
+
+	p.nextToken()
+	alternate := p.parseExpression(conditionalPrec - 1)
+	if alternate == nil {
+		return nil
+	}
+
+	loc := ast.Location{Start: start, End: alternate.Loc().End}
+	return ast.NewConditionalExpression(test, consequent, alternate, loc)
+}
+
 func (p *Parser) parseCallExpression(callee ast.Expression) ast.Expression {
 	start := callee.Loc().Start
 	p.nextToken()
 	var args []ast.Expression
 	if !p.curTokenIs(lexer.RParen) {
 		for {
-			arg := p.parseExpression(lowest)
+			arg := p.parseExpression(sequencePrec)
 			if arg == nil {
 				return nil
 			}
@@ -285,6 +350,290 @@ func (p *Parser) parseComputedMemberExpression(object ast.Expression) ast.Expres
 	}
 	loc := ast.Location{Start: start, End: convertPosition(p.curToken.End)}
 	return ast.NewMemberExpression(object, property, true, loc)
+}
+
+func (p *Parser) parseSequenceExpression(left ast.Expression) ast.Expression {
+	start := left.Loc().Start
+	expressions := []ast.Expression{left}
+
+	for {
+		p.nextToken()
+		expr := p.parseExpression(sequencePrec - 1)
+		if expr == nil {
+			return nil
+		}
+		if nested, ok := expr.(*ast.SequenceExpression); ok {
+			expressions = append(expressions, nested.Expressions...)
+		} else {
+			expressions = append(expressions, expr)
+		}
+
+		if !p.peekTokenIs(lexer.Comma) {
+			break
+		}
+
+		p.nextToken()
+	}
+
+	last := expressions[len(expressions)-1]
+	loc := ast.Location{Start: start, End: last.Loc().End}
+	return ast.NewSequenceExpression(expressions, loc)
+}
+
+func (p *Parser) parseArrayLiteral() ast.Expression {
+	start := p.curToken.Start
+	var elements []ast.Expression
+
+	if p.peekTokenIs(lexer.RBracket) {
+		p.nextToken()
+	} else {
+		p.nextToken()
+		for !p.curTokenIs(lexer.RBracket) && !p.curTokenIs(lexer.EOF) {
+			if p.curTokenIs(lexer.Comma) {
+				elements = append(elements, nil)
+				p.nextToken()
+				continue
+			}
+
+			var element ast.Expression
+			if p.curTokenIs(lexer.Ellipsis) {
+				spreadStart := p.curToken.Start
+				p.nextToken()
+				arg := p.parseExpression(sequencePrec)
+				if arg == nil {
+					return nil
+				}
+				element = ast.NewSpreadElement(arg, p.locFrom(spreadStart, p.curToken.End))
+			} else {
+				element = p.parseExpression(sequencePrec)
+				if element == nil {
+					return nil
+				}
+			}
+
+			elements = append(elements, element)
+
+			if p.peekTokenIs(lexer.Comma) {
+				p.nextToken()
+				if p.peekTokenIs(lexer.RBracket) {
+					elements = append(elements, nil)
+					p.nextToken()
+					break
+				}
+				p.nextToken()
+				continue
+			}
+
+			p.nextToken()
+		}
+	}
+
+	if !p.curTokenIs(lexer.RBracket) {
+		p.errors = append(p.errors, errors.New("unterminated array literal"))
+		return nil
+	}
+
+	loc := p.locFrom(start, p.curToken.End)
+	return ast.NewArrayLiteral(elements, loc)
+}
+
+func (p *Parser) parseObjectLiteral() ast.Expression {
+	start := p.curToken.Start
+	var properties []ast.Property
+
+	if p.peekTokenIs(lexer.RBrace) {
+		p.nextToken()
+	} else {
+		p.nextToken()
+		for !p.curTokenIs(lexer.RBrace) && !p.curTokenIs(lexer.EOF) {
+			if p.curTokenIs(lexer.Ellipsis) {
+				spreadStart := p.curToken.Start
+				p.nextToken()
+				arg := p.parseExpression(sequencePrec)
+				if arg == nil {
+					return nil
+				}
+				properties = append(properties, ast.NewSpreadElement(arg, p.locFrom(spreadStart, p.curToken.End)))
+			} else {
+				prop := p.parseObjectProperty()
+				if prop == nil {
+					return nil
+				}
+				properties = append(properties, prop)
+			}
+
+			if p.peekTokenIs(lexer.Comma) {
+				p.nextToken()
+				if p.peekTokenIs(lexer.RBrace) {
+					p.nextToken()
+					break
+				}
+				p.nextToken()
+				continue
+			}
+
+			p.nextToken()
+		}
+	}
+
+	if !p.curTokenIs(lexer.RBrace) {
+		p.errors = append(p.errors, errors.New("unterminated object literal"))
+		return nil
+	}
+
+	loc := p.locFrom(start, p.curToken.End)
+	return ast.NewObjectLiteral(properties, loc)
+}
+
+func (p *Parser) parseObjectProperty() ast.Property {
+	start := p.curToken.Start
+
+	if p.curTokenIs(lexer.Ellipsis) {
+		spreadStart := p.curToken.Start
+		p.nextToken()
+		arg := p.parseExpression(lowest)
+		if arg == nil {
+			return nil
+		}
+		return ast.NewSpreadElement(arg, p.locFrom(spreadStart, p.curToken.End))
+	}
+
+	computed := false
+	var key ast.Expression
+
+	switch p.curToken.Type {
+	case lexer.Identifier:
+		key = ast.NewIdentifier(p.curToken.Literal, p.tokenLocation(p.curToken))
+	case lexer.String:
+		val, err := strconv.Unquote(p.curToken.Literal)
+		if err != nil {
+			p.errors = append(p.errors, err)
+			val = p.curToken.Literal
+		}
+		key = ast.NewStringLiteral(val, p.tokenLocation(p.curToken))
+	case lexer.Number:
+		key = ast.NewNumberLiteral(p.curToken.Literal, p.tokenLocation(p.curToken))
+	case lexer.LBracket:
+		computed = true
+		p.nextToken()
+		expr := p.parseExpression(lowest)
+		if expr == nil {
+			return nil
+		}
+		key = expr
+		if !p.expectPeek(lexer.RBracket) {
+			return nil
+		}
+	default:
+		msg := "unexpected token " + string(p.curToken.Type) + " in object literal property"
+		p.errors = append(p.errors, errors.New(msg))
+		return nil
+	}
+
+	// shorthand property for identifiers only
+	if !computed {
+		if ident, ok := key.(*ast.Identifier); ok {
+			if p.peekTokenIs(lexer.Comma) || p.peekTokenIs(lexer.RBrace) {
+				loc := p.locFrom(start, p.curToken.End)
+				return ast.NewObjectProperty(key, ident, ast.PropertyInit, false, true, false, loc)
+			}
+		}
+	}
+
+	if !p.expectPeek(lexer.Colon) {
+		return nil
+	}
+
+	p.nextToken()
+	value := p.parseExpression(sequencePrec)
+	if value == nil {
+		return nil
+	}
+
+	loc := p.locFrom(start, p.curToken.End)
+	return ast.NewObjectProperty(key, value, ast.PropertyInit, computed, false, false, loc)
+}
+
+func (p *Parser) wrapNewExpression(expr ast.Expression, start lexer.Position) ast.Expression {
+	newStart := convertPosition(start)
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		switch callee := e.Callee.(type) {
+		case *ast.CallExpression:
+			wrapped := p.wrapNewExpression(callee, start)
+			if wrapped != e.Callee {
+				e.Callee = wrapped
+				p.extendNodeStart(e, newStart)
+				return e
+			}
+		case *ast.MemberExpression:
+			if containsCallExpression(callee.Object) {
+				original := callee.Object
+				p.wrapNewExpression(callee, start)
+				if original != callee.Object {
+					p.extendNodeStart(callee, newStart)
+					p.extendNodeStart(e, newStart)
+					return e
+				}
+			}
+		}
+		loc := ast.Location{Start: newStart, End: e.Loc().End}
+		return ast.NewNewExpression(e.Callee, e.Arguments, loc)
+	case *ast.MemberExpression:
+		wrapped := p.wrapNewExpression(e.Object, start)
+		if wrapped != e.Object {
+			e.Object = wrapped
+			p.extendNodeStart(e, newStart)
+			return e
+		}
+		loc := ast.Location{Start: newStart, End: e.Loc().End}
+		return ast.NewNewExpression(e, nil, loc)
+	case *ast.NewExpression:
+		p.extendNodeStart(e, newStart)
+		return e
+	default:
+		loc := ast.Location{Start: newStart, End: expr.Loc().End}
+		return ast.NewNewExpression(expr, nil, loc)
+	}
+}
+
+func containsCallExpression(expr ast.Expression) bool {
+	switch e := expr.(type) {
+	case *ast.CallExpression:
+		return true
+	case *ast.MemberExpression:
+		return containsCallExpression(e.Object)
+	default:
+		return false
+	}
+}
+
+func (p *Parser) extendNodeStart(node ast.Node, start ast.Position) {
+	if start.Offset < 0 {
+		return
+	}
+	loc := node.Loc()
+	if loc.Start.Offset > start.Offset {
+		loc.Start = start
+		p.setNodeLocation(node, loc)
+	}
+}
+
+func (p *Parser) parseRegExpLiteral() ast.Expression {
+	tok := p.curToken
+	lit := tok.Literal
+	pattern := ""
+	flags := ""
+
+	if len(lit) >= 2 && strings.HasPrefix(lit, "/") {
+		lastSlash := strings.LastIndex(lit, "/")
+		if lastSlash > 0 {
+			pattern = lit[1:lastSlash]
+			flags = lit[lastSlash+1:]
+		}
+	}
+
+	return ast.NewRegExpLiteral(pattern, flags, p.tokenLocation(tok))
 }
 
 func (p *Parser) noPrefixParseFnError(tt lexer.TokenType) {
