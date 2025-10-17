@@ -160,6 +160,242 @@ func TestParseNewExpressionMemberAccess(t *testing.T) {
 	}
 }
 
+func TestParseTemplateLiteralSimple(t *testing.T) {
+	prog := parseProgram(t, "`hello`; ")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	tmpl, ok := exprStmt.Expression.(*ast.TemplateLiteral)
+	if !ok {
+		t.Fatalf("expected TemplateLiteral, got %T", exprStmt.Expression)
+	}
+
+	if len(tmpl.Quasis) != 1 {
+		t.Fatalf("expected 1 quasi, got %d", len(tmpl.Quasis))
+	}
+
+	if !tmpl.Quasis[0].Tail {
+		t.Fatalf("single quasi should be tail")
+	}
+
+	if tmpl.Quasis[0].Cooked != "hello" {
+		t.Fatalf("unexpected cooked value: %q", tmpl.Quasis[0].Cooked)
+	}
+
+	if len(tmpl.Expressions) != 0 {
+		t.Fatalf("expected no expressions, got %d", len(tmpl.Expressions))
+	}
+}
+
+func TestParseTemplateLiteralWithExpression(t *testing.T) {
+	prog := parseProgram(t, "`greet ${name}!`; ")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	tmpl, ok := exprStmt.Expression.(*ast.TemplateLiteral)
+	if !ok {
+		t.Fatalf("expected TemplateLiteral, got %T", exprStmt.Expression)
+	}
+
+	if len(tmpl.Quasis) != 2 {
+		t.Fatalf("expected 2 quasis, got %d", len(tmpl.Quasis))
+	}
+
+	if tmpl.Quasis[0].Tail {
+		t.Fatalf("first quasi should not be tail")
+	}
+
+	if len(tmpl.Expressions) != 1 {
+		t.Fatalf("expected 1 expression, got %d", len(tmpl.Expressions))
+	}
+
+	if _, ok := tmpl.Expressions[0].(*ast.Identifier); !ok {
+		t.Fatalf("expected identifier expression, got %T", tmpl.Expressions[0])
+	}
+}
+
+func TestParseTaggedTemplateLiteral(t *testing.T) {
+	prog := parseProgram(t, "tag`value ${expr}`;")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	tagged, ok := exprStmt.Expression.(*ast.TaggedTemplateExpression)
+	if !ok {
+		t.Fatalf("expected TaggedTemplateExpression, got %T", exprStmt.Expression)
+	}
+
+	if _, ok := tagged.Tag.(*ast.Identifier); !ok {
+		t.Fatalf("expected identifier tag, got %T", tagged.Tag)
+	}
+
+	tmpl := tagged.Quasi
+	if tmpl == nil {
+		t.Fatalf("tagged template should include quasi")
+	}
+
+	if len(tmpl.Expressions) != 1 {
+		t.Fatalf("expected 1 expression in quasi, got %d", len(tmpl.Expressions))
+	}
+
+	if len(tmpl.Quasis) != 2 {
+		t.Fatalf("expected 2 quasis in quasi, got %d", len(tmpl.Quasis))
+	}
+}
+
+func TestParseArrowFunctionNoParams(t *testing.T) {
+	prog := parseProgram(t, "() => 42;")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	arrow, ok := exprStmt.Expression.(*ast.ArrowFunctionExpression)
+	if !ok {
+		t.Fatalf("expected ArrowFunctionExpression, got %T", exprStmt.Expression)
+	}
+
+	if len(arrow.Params) != 0 {
+		t.Fatalf("expected no parameters, got %d", len(arrow.Params))
+	}
+
+	if !arrow.ExpressionBody {
+		t.Fatalf("expected expression body")
+	}
+
+	body, ok := arrow.Body.(*ast.NumberLiteral)
+	if !ok || body.Value != "42" {
+		t.Fatalf("unexpected arrow body: %#v", arrow.Body)
+	}
+}
+
+func TestParseArrowFunctionWithPatterns(t *testing.T) {
+	prog := parseProgram(t, "(a, b = 2, ...rest) => { return rest; };")
+
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+
+	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	arrow, ok := exprStmt.Expression.(*ast.ArrowFunctionExpression)
+	if !ok {
+		t.Fatalf("expected ArrowFunctionExpression, got %T", exprStmt.Expression)
+	}
+
+	if len(arrow.Params) != 3 {
+		t.Fatalf("expected 3 parameters, got %d", len(arrow.Params))
+	}
+
+	if _, ok := arrow.Params[0].(*ast.Identifier); !ok {
+		t.Fatalf("first parameter should be identifier, got %T", arrow.Params[0])
+	}
+
+	assign, ok := arrow.Params[1].(*ast.AssignmentPattern)
+	if !ok {
+		t.Fatalf("second parameter should be AssignmentPattern, got %T", arrow.Params[1])
+	}
+
+	if _, ok := assign.Left.(*ast.Identifier); !ok {
+		t.Fatalf("assignment left should be identifier, got %T", assign.Left)
+	}
+
+	if _, ok := assign.Right.(*ast.NumberLiteral); !ok {
+		t.Fatalf("assignment right should be NumberLiteral, got %T", assign.Right)
+	}
+
+	if rest, ok := arrow.Params[2].(*ast.RestElement); !ok {
+		t.Fatalf("expected rest element, got %T", arrow.Params[2])
+	} else if _, ok := rest.Argument.(*ast.Identifier); !ok {
+		t.Fatalf("rest element argument should be identifier, got %T", rest.Argument)
+	}
+
+	if arrow.ExpressionBody {
+		t.Fatalf("expected block body")
+	}
+
+	body, ok := arrow.Body.(*ast.BlockStatement)
+	if !ok {
+		t.Fatalf("expected block statement body, got %T", arrow.Body)
+	}
+
+	if len(body.Body) != 1 {
+		t.Fatalf("expected single statement in body, got %d", len(body.Body))
+	}
+
+	ret, ok := body.Body[0].(*ast.ReturnStatement)
+	if !ok {
+		t.Fatalf("expected return statement in body, got %T", body.Body[0])
+	}
+
+	if _, ok := ret.Argument.(*ast.Identifier); !ok {
+		t.Fatalf("expected return argument identifier, got %T", ret.Argument)
+	}
+}
+
+func TestParseArrowFunctionNested(t *testing.T) {
+	prog := parseProgram(t, "x => y => z;")
+
+	arrowOuter, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		t.Fatalf("expected ExpressionStatement, got %T", prog.Body[0])
+	}
+
+	outer, ok := arrowOuter.Expression.(*ast.ArrowFunctionExpression)
+	if !ok {
+		t.Fatalf("expected outer ArrowFunctionExpression, got %T", arrowOuter.Expression)
+	}
+
+	if len(outer.Params) != 1 {
+		t.Fatalf("expected 1 outer param, got %d", len(outer.Params))
+	}
+
+	if _, ok := outer.Params[0].(*ast.Identifier); !ok {
+		t.Fatalf("outer parameter should be identifier, got %T", outer.Params[0])
+	}
+
+	inner, ok := outer.Body.(*ast.ArrowFunctionExpression)
+	if !ok {
+		t.Fatalf("expected inner ArrowFunctionExpression, got %T", outer.Body)
+	}
+
+	if !inner.ExpressionBody {
+		t.Fatalf("expected inner expression body")
+	}
+
+	if _, ok := inner.Body.(*ast.Identifier); !ok {
+		t.Fatalf("expected inner body identifier, got %T", inner.Body)
+	}
+}
+
 func TestParseVariableDeclaration(t *testing.T) {
 	prog := parseProgram(t, "const answer = 42;")
 

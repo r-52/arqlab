@@ -39,6 +39,7 @@ var precedences = map[lexer.TokenType]precedence{
 	lexer.BitwiseOrAssign:     assignmentPrec,
 	lexer.BitwiseXorAssign:    assignmentPrec,
 	lexer.Question:            conditionalPrec,
+	lexer.Arrow:               assignmentPrec,
 	lexer.LogicalOr:           logicalOrPrec,
 	lexer.LogicalAnd:          logicalAndPrec,
 	lexer.BitwiseOr:           bitwiseOrPrec,
@@ -67,6 +68,8 @@ var precedences = map[lexer.TokenType]precedence{
 	lexer.LParen:              callPrec,
 	lexer.LBracket:            callPrec,
 	lexer.Dot:                 callPrec,
+	lexer.TemplateHead:        callPrec,
+	lexer.TemplateTail:        callPrec,
 }
 
 func (p *Parser) peekPrecedence() precedence {

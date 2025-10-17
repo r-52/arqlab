@@ -32,6 +32,9 @@ func (p *Parser) registerPrefixFns() {
 	p.registerPrefix(lexer.KeywordVoid, p.parsePrefixExpression)
 	p.registerPrefix(lexer.KeywordDelete, p.parsePrefixExpression)
 	p.registerPrefix(lexer.KeywordNew, p.parseNewExpression)
+	p.registerPrefix(lexer.Ellipsis, p.parseSpreadElement)
+	p.registerPrefix(lexer.TemplateHead, p.parseTemplateLiteral)
+	p.registerPrefix(lexer.TemplateTail, p.parseTemplateLiteral)
 }
 
 func (p *Parser) registerInfixFns() {
@@ -76,6 +79,9 @@ func (p *Parser) registerInfixFns() {
 	p.registerInfix(lexer.BitwiseXor, p.parseInfixExpression)
 	p.registerInfix(lexer.Question, p.parseConditionalExpression)
 	p.registerInfix(lexer.Comma, p.parseSequenceExpression)
+	p.registerInfix(lexer.Arrow, p.parseArrowFunctionExpression)
+	p.registerInfix(lexer.TemplateHead, p.parseTaggedTemplateExpression)
+	p.registerInfix(lexer.TemplateTail, p.parseTaggedTemplateExpression)
 }
 
 func (p *Parser) registerPrefix(tt lexer.TokenType, fn prefixParseFn) {
@@ -152,6 +158,15 @@ func (p *Parser) parseSuperExpression() ast.Expression {
 func (p *Parser) parseGroupedExpression() ast.Expression {
 	start := p.curToken.Start
 	p.nextToken()
+	if p.curTokenIs(lexer.RParen) {
+		if p.peekTokenIs(lexer.Arrow) {
+			loc := p.locFrom(start, p.curToken.End)
+			return ast.NewSequenceExpression(nil, loc)
+		}
+		p.errors = append(p.errors, errors.New("empty grouping expression"))
+		return nil
+	}
+
 	exp := p.parseExpression(lowest)
 	if exp == nil {
 		return nil
@@ -378,6 +393,253 @@ func (p *Parser) parseSequenceExpression(left ast.Expression) ast.Expression {
 	last := expressions[len(expressions)-1]
 	loc := ast.Location{Start: start, End: last.Loc().End}
 	return ast.NewSequenceExpression(expressions, loc)
+}
+
+func (p *Parser) parseSpreadElement() ast.Expression {
+	start := p.curToken.Start
+	p.nextToken()
+	argument := p.parseExpression(sequencePrec)
+	if argument == nil {
+		return nil
+	}
+	loc := ast.Location{Start: convertPosition(start), End: argument.Loc().End}
+	return ast.NewSpreadElement(argument, loc)
+}
+
+func (p *Parser) parseTemplateLiteral() ast.Expression {
+	start := p.curToken.Start
+	tmpl, ok := p.readTemplateLiteral(start)
+	if !ok {
+		return nil
+	}
+	return tmpl
+}
+
+func (p *Parser) parseTaggedTemplateExpression(tag ast.Expression) ast.Expression {
+	start := p.curToken.Start
+	tmpl, ok := p.readTemplateLiteral(start)
+	if !ok {
+		return nil
+	}
+	loc := ast.Location{Start: tag.Loc().Start, End: tmpl.Loc().End}
+	return ast.NewTaggedTemplateExpression(tag, tmpl, loc)
+}
+
+func (p *Parser) parseArrowFunctionExpression(left ast.Expression) ast.Expression {
+	params, ok := p.convertArrowParams(left)
+	if !ok {
+		return nil
+	}
+
+	p.nextToken()
+
+	var (
+		bodyNode       ast.Node
+		expressionBody = true
+	)
+
+	if p.curTokenIs(lexer.LBrace) {
+		bodyStmt := p.parseBlockStatement()
+		if bodyStmt == nil {
+			return nil
+		}
+		block, ok := bodyStmt.(*ast.BlockStatement)
+		if !ok {
+			p.errors = append(p.errors, errors.New("arrow function body must be block statement"))
+			return nil
+		}
+		bodyNode = block
+		expressionBody = false
+	} else {
+		bodyExpr := p.parseExpression(assignmentPrec - 1)
+		if bodyExpr == nil {
+			return nil
+		}
+		bodyNode = bodyExpr
+	}
+
+	loc := ast.Location{Start: left.Loc().Start, End: bodyNode.Loc().End}
+	return ast.NewArrowFunctionExpression(params, bodyNode, expressionBody, loc)
+}
+
+func (p *Parser) convertArrowParams(node ast.Expression) ([]ast.Pattern, bool) {
+	switch n := node.(type) {
+	case *ast.SequenceExpression:
+		return p.sequenceExpressionsToPatterns(n)
+	case *ast.Identifier:
+		return []ast.Pattern{n}, true
+	default:
+		pat, ok := p.expressionToPattern(n)
+		if !ok {
+			p.errors = append(p.errors, errors.New("invalid arrow function parameters"))
+			return nil, false
+		}
+		return []ast.Pattern{pat}, true
+	}
+}
+
+func (p *Parser) sequenceExpressionsToPatterns(seq *ast.SequenceExpression) ([]ast.Pattern, bool) {
+	if len(seq.Expressions) == 0 {
+		return nil, true
+	}
+	params := make([]ast.Pattern, 0, len(seq.Expressions))
+	for i, expr := range seq.Expressions {
+		if spread, ok := expr.(*ast.SpreadElement); ok {
+			if i != len(seq.Expressions)-1 {
+				p.errors = append(p.errors, errors.New("rest parameter must be last"))
+				return nil, false
+			}
+			pat, ok := p.expressionToPattern(spread.Argument)
+			if !ok {
+				return nil, false
+			}
+			rest := ast.NewRestElement(pat, spread.Loc())
+			params = append(params, rest)
+			continue
+		}
+		pat, ok := p.expressionToPattern(expr)
+		if !ok {
+			return nil, false
+		}
+		params = append(params, pat)
+	}
+	return params, true
+}
+
+func (p *Parser) expressionToPattern(expr ast.Expression) (ast.Pattern, bool) {
+	switch e := expr.(type) {
+	case *ast.Identifier:
+		return e, true
+	case *ast.ArrayLiteral:
+		return p.arrayLiteralToPattern(e)
+	case *ast.ObjectLiteral:
+		return p.objectLiteralToPattern(e)
+	case *ast.AssignmentExpression:
+		if e.Operator != "=" {
+			p.errors = append(p.errors, errors.New("invalid assignment in parameter"))
+			return nil, false
+		}
+		left, ok := p.expressionToPattern(e.Left)
+		if !ok {
+			return nil, false
+		}
+		loc := e.Loc()
+		return ast.NewAssignmentPattern(left, e.Right, loc), true
+	default:
+		p.errors = append(p.errors, errors.New("invalid parameter pattern"))
+		return nil, false
+	}
+}
+
+func (p *Parser) arrayLiteralToPattern(arr *ast.ArrayLiteral) (ast.Pattern, bool) {
+	var (
+		elements ast.PatternList
+		rest     *ast.RestElement
+	)
+
+	for i, elem := range arr.Elements {
+		if elem == nil {
+			elements = append(elements, nil)
+			continue
+		}
+		if spread, ok := elem.(*ast.SpreadElement); ok {
+			if rest != nil || i != len(arr.Elements)-1 {
+				p.errors = append(p.errors, errors.New("rest element must be last in array pattern"))
+				return nil, false
+			}
+			arg, ok := p.expressionToPattern(spread.Argument)
+			if !ok {
+				return nil, false
+			}
+			rest = ast.NewRestElement(arg, spread.Loc())
+			continue
+		}
+		pat, ok := p.expressionToPattern(elem)
+		if !ok {
+			return nil, false
+		}
+		elements = append(elements, pat)
+	}
+
+	return ast.NewArrayPattern(elements, rest, arr.Loc()), true
+}
+
+func (p *Parser) objectLiteralToPattern(obj *ast.ObjectLiteral) (ast.Pattern, bool) {
+	var (
+		props []*ast.ObjectPatternProperty
+		rest  *ast.RestElement
+	)
+
+	for i, prop := range obj.Properties {
+		switch pr := prop.(type) {
+		case *ast.ObjectProperty:
+			if pr.PropKind != ast.PropertyInit || pr.Method {
+				p.errors = append(p.errors, errors.New("invalid object pattern property"))
+				return nil, false
+			}
+			value, ok := p.expressionToPattern(pr.Value)
+			if !ok {
+				return nil, false
+			}
+			props = append(props, ast.NewObjectPatternProperty(pr.Key, value, pr.Computed, pr.Shorthand, pr.Loc()))
+		case *ast.SpreadElement:
+			if rest != nil || i != len(obj.Properties)-1 {
+				p.errors = append(p.errors, errors.New("rest element must be last in object pattern"))
+				return nil, false
+			}
+			arg, ok := p.expressionToPattern(pr.Argument)
+			if !ok {
+				return nil, false
+			}
+			rest = ast.NewRestElement(arg, pr.Loc())
+		default:
+			p.errors = append(p.errors, errors.New("unsupported object literal property in pattern"))
+			return nil, false
+		}
+	}
+
+	return ast.NewObjectPattern(props, rest, obj.Loc()), true
+}
+
+func (p *Parser) readTemplateLiteral(start lexer.Position) (*ast.TemplateLiteral, bool) {
+	var quasis []*ast.TemplateElement
+	var expressions []ast.Expression
+
+	for {
+		tok := p.curToken
+		tail := tok.Type == lexer.TemplateTail
+		elem := ast.NewTemplateElement(tok.Literal, tok.Literal, tail, p.tokenLocation(tok))
+		quasis = append(quasis, elem)
+
+		if tail {
+			break
+		}
+
+		if !p.expectPeek(lexer.TemplateExprStart) {
+			return nil, false
+		}
+
+		p.nextToken()
+		expr := p.parseExpression(lowest)
+		if expr == nil {
+			return nil, false
+		}
+		expressions = append(expressions, expr)
+
+		if !p.expectPeek(lexer.TemplateExprEnd) {
+			return nil, false
+		}
+
+		if !(p.peekTokenIs(lexer.TemplateMiddle) || p.peekTokenIs(lexer.TemplateTail)) {
+			p.errors = append(p.errors, errors.New("expected template continuation"))
+			return nil, false
+		}
+
+		p.nextToken()
+	}
+
+	loc := p.locFrom(start, p.curToken.End)
+	return ast.NewTemplateLiteral(quasis, expressions, loc), true
 }
 
 func (p *Parser) parseArrayLiteral() ast.Expression {
